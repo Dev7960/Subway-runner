@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>3D Runner</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #000; font-family: Arial, sans-serif; }
+    #hud { position: fixed; top: 10px; left: 15px; color: #fff; font-size: 20px; text-shadow: 0 0 4px #000; pointer-events: none; }
+    #msg { position: fixed; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center; color: #fff; background: rgba(0, 0, 0, 0.55); text-align: center; }
+    #msg h1 { font-size: 48px; margin: 0 0 10px; }
+        .overlay { position: fixed; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center; color: #fff; background: rgba(0, 0, 0, 0.55); text-align: center; }
+    .overlay h1 { font-size: 48px; margin: 0 0 10px; }
+    #pauseBtn { position: fixed; top: 10px; right: 10px; z-index: 5; padding: 8px 14px; font-size: 18px; background: rgba(255, 255, 255, 0.25); color: #fff; border: none; border-radius: 6px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div id="hud"></div>
+  <div id="msg">
+  <h1>Game Over</h1>
+  <p id="final"></p>
+  <p>Click Enter / space to restart</p>
+</div>
+<div id="pauseMsg" class="overlay">
+  <h1>Paused</h1>
+  <p>P ya Esc dabao, ya ▶ button dabao</p>
+</div>
+<button id="pauseBtn">❚❚</button>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script>
+    // ---------- Settings ----------
+    const LANE_X = [-2, 0, 2];   // 3 lanes ki X position
+    const GRAVITY = -0.02;
+    const JUMP_V = 0.3;
+    const START_SPEED = 14;      // units per second
+    const MAX_SPEED = 30;
+
+    // ---------- State ----------
+    let scene, camera, renderer, player, road;
+    let stripes = [], obstacles = [], coins = [];
+    let playerLane, playerY, playerVY, jumping;
+    let speed, distance, coinCount, best = 0, gameOver;
+    let spawnTimer, coinTimer, lastTime = 0;
+        let paused = false;
+    const pauseMsg = document.getElementById("pauseMsg");
+    const pauseBtn = document.getElementById("pauseBtn");
+
+    const hud = document.getElementById("hud");
+    const msg = document.getElementById("msg");
+    const finalTxt = document.getElementById("final");// ---------- Realistic background ----------
+function makeSkyTexture() {
+  const c = document.createElement("canvas");
+  c.width = 2;
+  c.height = 512;
+  const g = c.getContext("2d");
+  const grad = g.createLinearGradient(0, 0, 0, 512);
+  grad.addColorStop(0, "#7a4e8c");   // upar: halka purple
+  grad.addColorStop(0.5, "#e9877a"); // beech: gulabi-orange
+  grad.addColorStop(1, "#ffd9a0");   // niche (horizon): peach
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 2, 512);
+  return new THREE.CanvasTexture(c);
+}
+function makeBuildingTexture(baseHex, h) {
+  const c = document.createElement("canvas");
+  c.width = 128;
+  c.height = 256;
+  const g = c.getContext("2d");
+
+  // Deewar ka base color
+  g.fillStyle = "#" + baseHex.toString(16).padStart(6, "0");
+  g.fillRect(0, 0, 128, 256);
+
+  // Upar aur neeche ki halki patti
+  g.fillStyle = "rgba(0,0,0,0.18)";
+  g.fillRect(0, 0, 128, 10);
+  g.fillRect(0, 246, 128, 10);
+
+  // Windows: 3 columns, 2 rows is tile mein
+  const winW = 22, winH = 60;
+  const gapX = (128 - 3 * winW) / 4;
+  for (let row = 0; row < 2; row++) {
+    for (let col = 0; col < 3; col++) {
+      const x = gapX + col * (winW + gapX);
+      const y = 30 + row * 110;
+      // Window ka frame
+      g.fillStyle = "rgba(0,0,0,0.35)";
+      g.fillRect(x - 2, y - 2, winW + 4, winH + 4);
+      // Kuch windows roshan, kuch band
+      g.fillStyle = Math.random() < 0.3 ? "#ffe59a" : "#34495e";
+      g.fillRect(x, y, winW, winH);
+      // Shisha ki chamak
+      g.fillStyle = "rgba(255,255,255,0.12)";
+      g.fillRect(x, y, winW / 2, winH);
+    }
+  }
+
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  // Building jitni lambi, utni tiles repeat hongi
+  t.repeat.set(1, Math.max(1, Math.round(h / 2.5)));
+  return t;
+}
+function makeAsphaltTexture() {
+  const c = document.createElement("canvas");
+  c.width = 512;
+  c.height = 512;
+  const g = c.getContext("2d");
+  g.fillStyle = "#2b2e35";
+  g.fillRect(0, 0, 512, 512);
+
+  // Halke dhabbe (asphalt ka patchy look)
+  for (let i = 0; i < 300; i++) {
+    const x = Math.random() * 512;
+    const y = Math.random() * 512;
+    const r = 4 + Math.random() * 18;
+    g.fillStyle = Math.random() < 0.5
+      ? "rgba(255,255,255,0.03)"
+      : "rgba(0,0,0,0.08)";
+    g.beginPath();
+    g.arc(x, y, r, 0, Math.PI * 2);
+    g.fill();
+  }
+
+  // Barik grain
+  for (let i = 0; i < 8000; i++) {
+    const v = 60 + Math.floor(Math.random() * 50);
+    g.fillStyle = `rgba(${v},${v},${v},0.5)`;
+    g.fillRect(Math.random() * 512, Math.random() * 512, 1, 1);
+  }
+
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.repeat.set(1, 20);
+  t.anisotropy = 8;
+  return t;
+}
+
+const decor = [];
+function addDecor() {
+  const trunkMat = new THREE.MeshLambertMaterial({ color: 0x6b4a2b });
+  const leafMat = new THREE.MeshLambertMaterial({ color: 0x2e7d32 });
+  const wallColors = [0xd7c7a5, 0xb8c4d0, 0xc9a58a, 0xa9b8a0];
+
+  for (let i = 0; i < 40; i++) {
+    const side = i % 2 ? 1 : -1;
+    const z = -150 + i * 4;
+    let obj;
+
+    if (i % 3 === 0) {
+      // Pedh: trunk + crown
+      obj = new THREE.Group();
+      const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.2, 1.5, 8), trunkMat);
+      trunk.position.y = 0.75;
+      const crown = new THREE.Mesh(new THREE.SphereGeometry(0.9, 12, 12), leafMat);
+      crown.position.y = 2.1;
+      obj.add(trunk, crown); 
+     } else {
+      // Ghar / building: windows wali texture ke saath
+      const h = 3 + Math.random() * 6;
+      const color = wallColors[i % wallColors.length];
+      obj = new THREE.Mesh(
+        new THREE.BoxGeometry(2.5, h, 2.5),
+        new THREE.MeshLambertMaterial({ map: makeBuildingTexture(color, h) })
+      );
+      obj.position.y = h / 2;
+    }
+
+    obj.position.x = side * (7 + Math.random() * 4);
+    obj.position.z = z;
+    scene.add(obj);
+    decor.push(obj);
+  }
+}
+
+    // ---------- Setup ----------
+    function init() {
+      scene = new THREE.Scene();
+      scene.background = makeSkyTexture();
+      scene.fog = new THREE.Fog(0xc9dcec, 30, 110);
+
+      camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.1, 200);
+
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(innerWidth, innerHeight);
+      document.body.appendChild(renderer.domElement);
+
+      scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+      const sun = new THREE.DirectionalLight(0xffffff, 0.8);
+      sun.position.set(3, 10, 5);
+      scene.add(sun);
+
+      // Road
+      road = new THREE.Mesh(
+        new THREE.PlaneGeometry(10, 300),
+      new THREE.MeshLambertMaterial({ map: makeAsphaltTexture() })
+      );
+      road.rotation.x = -Math.PI / 2;
+      road.position.z = -120;
+      scene.add(road);
+      // Road ke dono kinare par safed lines
+const edgeMat = new THREE.MeshBasicMaterial({ color: 0xeeeeee });
+for (const x of [-4.8, 4.8]) {
+  const line = new THREE.Mesh(new THREE.PlaneGeometry(0.15, 300), edgeMat);
+  line.rotation.x = -Math.PI / 2;
+  line.position.set(x, 0.01, -120);
+  scene.add(line);
+}
+      
+
+      // Grass on both sides
+      const grassMat = new THREE.MeshLambertMaterial({ color: 0x6fa84f });
+      for (const x of [-9, 9]) {
+        const g = new THREE.Mesh(new THREE.PlaneGeometry(20, 300), grassMat);
+        g.rotation.x = -Math.PI / 2;
+        g.position.set(x, -0.01, -120);
+        scene.add(g);
+      }
+
+      // Lane dividers (moving stripes)
+      const stripeGeo = new THREE.PlaneGeometry(0.12, 2);
+      const stripeMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+      for (const x of [-1, 1]) {
+        for (let z = -100; z < 20; z += 4) {
+          const s = new THREE.Mesh(stripeGeo, stripeMat);
+          s.rotation.x = -Math.PI / 2;
+          s.position.set(x, 0.01, z);
+          scene.add(s);
+          stripes.push(s);
+        }
+      }
+      // Player: insaan jaisa model
+      player = new THREE.Group();
+      const skin = new THREE.MeshLambertMaterial({ color: 0xf1c27d });
+      const shirt = new THREE.MeshLambertMaterial({ color: 0xe91e63 });
+      const pants = new THREE.MeshLambertMaterial({ color: 0x2c3e50 });
+      const shoe = new THREE.MeshLambertMaterial({ color: 0x222222 });
+      const hair = new THREE.MeshLambertMaterial({ color: 0x3b2314 });
+
+      // Dhad (torso)
+      const torso = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.6, 0.35), shirt);
+      torso.position.y = 1.05;
+
+      // Sar aur baal
+      const head = new THREE.Mesh(new THREE.SphereGeometry(0.22, 16, 16), skin);
+      head.position.y = 1.5;
+      const hairMesh = new THREE.Mesh(
+        new THREE.SphereGeometry(0.235, 16, 12, 0, Math.PI * 2, 0, Math.PI / 2),
+        hair
+      );
+      hairMesh.position.y = 1.52;
+
+      // Haath aur pair ke liye pivot (jodne ka bindu upar hota hai)
+      function makeLimb(w, h, mat, x, y) {
+        const pivot = new THREE.Group();
+        pivot.position.set(x, y, 0);
+        const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, w), mat);
+        m.position.y = -h / 2;
+        pivot.add(m);
+        return pivot;
+      }
+      const armL = makeLimb(0.15, 0.55, shirt, -0.36, 1.3);
+      const armR = makeLimb(0.15, 0.55, shirt, 0.36, 1.3);
+      const legL = makeLimb(0.2, 0.6, pants, -0.14, 0.7);
+      const legR = makeLimb(0.2, 0.6, pants, 0.14, 0.7);
+
+      // Joote
+      for (const leg of [legL, legR]) {
+        const s = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.12, 0.34), shoe);
+        s.position.set(0, -0.66, 0.06);
+        leg.add(s);
+      }
+
+      player.add(torso, head, hairMesh, armL, armR, legL, legR);
+      player.userData = { armL, armR, legL, legR };
+      scene.add(player);
+      addDecor();
+
+      window.addEventListener("resize", () => {
+        camera.aspect = innerWidth / innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(innerWidth, innerHeight);
+      });
+
+      reset();
+      requestAnimationFrame(loop);
+    }
+
+    function reset() {
+      for (const o of obstacles) scene.remove(o.mesh);
+      for (const c of coins) scene.remove(c.mesh);
+      obstacles = [];
+      coins = [];
+
+      playerLane = 1;
+      playerY = 0;
+      playerVY = 0;
+      jumping = false;
+      speed = START_SPEED;
+      distance = 0;
+      coinCount = 0;
+      gameOver = false;
+      spawnTimer = 1.0;
+      coinTimer = 0.5;
+      player.position.set(LANE_X[playerLane], 0, 0);
+      msg.style.display = "none";
+    }
+          paused = false;
+      pauseMsg.style.display = "none";
+      pauseBtn.textContent = "❚❚";
+
+    // ---------- Actions ----------
+        function togglePause() {
+      if (gameOver) return;
+      paused = !paused;
+      pauseMsg.style.display = paused ? "flex" : "none";
+      pauseBtn.textContent = paused ? "▶" : "❚❚";
+    }
+    function changeLane(dir) {
+      if (gameOver) return;
+      playerLane = Math.max(0, Math.min(2, playerLane + dir));
+    }
+
+    function jump() {
+      if (gameOver) return;
+      if (!jumping) {
+        jumping = true;
+        playerVY = JUMP_V;
+      }
+    }
+
+    // ---------- Spawning ----------
+    function spawnObstacle() {
+      const lane = Math.floor(Math.random() * 3);
+      const mesh = new THREE.Mesh(
+        new THREE.BoxGeometry(1.6, 1.0, 0.6),
+        new THREE.MeshLambertMaterial({ color: 0xe74c3c })
+      );
+      mesh.position.set(LANE_X[lane], 0.5, -70);
+      scene.add(mesh);
+      obstacles.push({ mesh, lane });
+    }
+
+    function spawnCoinRow() {
+      const lane = Math.floor(Math.random() * 3);
+      for (let i = 0; i < 4; i++) {
+        const mesh = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.3, 0.3, 0.08, 16),
+          new THREE.MeshLambertMaterial({ color: 0xffd700 })
+        );
+        mesh.rotation.x = Math.PI / 2;
+        mesh.position.set(LANE_X[lane], 1.0, -70 - i * 2);
+        scene.add(mesh);
+        coins.push({ mesh, lane });
+      }
+    }
+
+    // ---------- Update ----------
+    function update(dt) {
+      if (gameOver) return;
+
+      const step = dt * 60; // physics ko frame jaisa rakhne ke liye
+
+      // Speed badhti rahe
+      speed = Math.min(MAX_SPEED, START_SPEED + distance / 150);
+      distance += speed * dt;
+
+      // Lane change smooth
+      player.position.x += (LANE_X[playerLane] - player.position.x) * Math.min(1, 12 * dt);
+
+      // Jump
+      if (jumping) {
+        playerY += playerVY * step;
+        playerVY += GRAVITY * step;
+        if (playerY <= 0) {
+          playerY = 0;
+          playerVY = 0;
+          jumping = false;
+        }
+      }
+      player.position.y = playerY;
+      player.rotation.y = Math.sin(distance * 2) * 0.1; // halka sa jhoolna
+      // Daudne ka animation: pair aur haath aage-peeche jhoolte hain
+      const sw = Math.sin(distance * 1.5) * 0.5;
+      const { armL, armR, legL, legR } = player.userData;
+      if (jumping) {
+        // Jump mein pair aur haath seedhe
+        legL.rotation.x = 0.3;
+        legR.rotation.x = 0.3;
+        armL.rotation.x = -2.2;
+        armR.rotation.x = -2.2;
+      } else {
+        legL.rotation.x = sw;
+        legR.rotation.x = -sw;
+        armL.rotation.x = -sw * 0.8;
+        armR.rotation.x = sw * 0.8;
+      }
+      // Spawn
+      spawnTimer -= dt;
+      if (spawnTimer <= 0) {
+        spawnObstacle();
+        spawnTimer = 0.9 + Math.random() * 0.8;
+      }
+      coinTimer -= dt;
+      if (coinTimer <= 0) {
+        spawnCoinRow();
+        coinTimer = 1.5 + Math.random() * 1.5;
+      }
+
+      // Obstacles move toward player
+      for (const o of obstacles) {
+        o.mesh.position.z += speed * dt;
+
+        // Collision: same lane, z overlap, aur player obstacle se neeche hai
+        const sameLane = Math.abs(player.position.x - o.mesh.position.x) < 1.0;
+        const zHit = Math.abs(o.mesh.position.z) < 0.6;
+        if (sameLane && zHit && playerY < 1.0) {
+          gameOver = true;
+          best = Math.max(best, Math.floor(distance));
+          finalTxt.textContent = "Score: " + Math.floor(distance) + "   Coins: " + coinCount;
+          msg.style.display = "flex";
+          return;
+        }
+      }
+      obstacles = obstacles.filter(o => {
+        if (o.mesh.position.z > 10) { scene.remove(o.mesh); return false; }
+        return true;
+      });
+
+      // Coins move + collect
+      for (const c of coins) {
+        c.mesh.position.z += speed * dt;
+        c.mesh.rotation.z += dt * 5;
+      }
+      coins = coins.filter(c => {
+        const sameLane = Math.abs(player.position.x - c.mesh.position.x) < 1.0;
+        const zHit = Math.abs(c.mesh.position.z) < 0.6;
+        const yHit = playerY < 2.5;
+        if (sameLane && zHit && yHit) {
+          coinCount++;
+          scene.remove(c.mesh);
+          return false;
+        }
+        if (c.mesh.position.z > 10) {
+          scene.remove(c.mesh);
+          return false;
+        }
+        return true;
+      });
+      // Background decor (pedh, ghar) bhi peeche jaaye
+for (const d of decor) {
+  d.position.z += speed * dt;
+  if (d.position.z > 10) d.position.z -= 160;
+}
+
+      // Road stripes ko aage bhaga kar loop karo
+      for (const s of stripes) {
+        s.position.z += speed * dt;
+        if (s.position.z > 20) s.position.z -= 120;
+      }
+    }
+
+    // ---------- Render ----------
+    function render() {
+      // Camera player ke peechhe, halka sa follow karta hua
+      camera.position.set(player.position.x * 0.6, 3.5 + playerY * 0.3, 6);
+      camera.lookAt(player.position.x * 0.6, 1.2, -6);
+
+      hud.innerHTML =
+        "Score: " + Math.floor(distance) + "<br>" +
+        "Coins: " + coinCount + "<br>" +
+        "Best: " + best;
+
+      renderer.render(scene, camera);
+    }
+    function loop(time) {
+      const dt = Math.min(0.05, (time - lastTime) / 1000 || 0);
+      lastTime = time;
+      if (!paused) update(dt);
+      render();
+      requestAnimationFrame(loop);
+    }
+
+    // ---------- Controls ----------
+    document.addEventListener("keydown", (e) => {    
+          if (e.key === "p" || e.key === "P" || e.key === "Escape") {
+        togglePause();
+        return;
+      }
+      if (paused) return;
+        
+      if (e.key === "ArrowLeft" || e.key === "a" || e.key === "A") changeLane(-1);
+      else if (e.key === "ArrowRight" || e.key === "d" || e.key === "D") changeLane(1);
+      else if (e.key === "ArrowUp" || e.key === "w" || e.key === "W" || e.key === " ") {
+        e.preventDefault();
+        if (gameOver) reset(); else jump();
+      } else if (e.key === "Enter" && gameOver) {
+        reset();
+      }
+    });
+
+    // Mobile: swipe left/right se lane, tap se jump
+    let tx = 0, ty = 0;
+    renderer && 0;
+    document.addEventListener("touchstart", (e) => {
+      tx = e.touches[0].clientX;
+      ty = e.touches[0].clientY;
+    }, { passive: true });
+    document.addEventListener("touchend", (e) => {
+              if (e.target === pauseBtn) return;
+      if (gameOver) { reset(); return; }
+      const dx = e.changedTouches[0].clientX - tx;
+      const dy = e.changedTouches[0].clientY - ty;
+      if (Math.abs(dx) > 30) changeLane(dx > 0 ? 1 : -1);
+      else if (dy < -30 || Math.abs(dy) <= 30) jump();
+    });
+    pauseBtn.addEventListener("click", togglePause);
+    init();
+  </script>
+</body>
+</html>
